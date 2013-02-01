@@ -15,7 +15,7 @@ module MG
   def check_state_attr(server,attrs={})
     a_time = attrs["timeout"]
     sttime = attrs["sttime"]
-    q = query_var(server,attrs={})
+    q = query_var(server,attrs)
     until q do
       if (Time.now.to_f-sttime)>=a_time
         Chef::Application.fatal! "Timeout exceeded while node #{server.name} syncing.."
@@ -23,7 +23,7 @@ module MG
         Chef::Log.info "Waiting while node #{server.name} syncing.."
         sleep 10
         server = search(:node, "name:#{server.name} AND chef_environment:#{node.chef_environment}")[0]
-        q = query_var(server,attrs={})
+        q = query_var(server,attrs)
       end
     end
     true
