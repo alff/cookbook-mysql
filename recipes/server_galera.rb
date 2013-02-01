@@ -314,7 +314,6 @@ end
 # Set final flag that current node have fully working status
 ruby_block "Cluster-ready" do
   block do
-    node.set["galera"]["cluster_status"] = "ready"
     node.set["galera"]["cluster_state"] = "ready"
   end
   action :nothing
@@ -410,7 +409,7 @@ unless node["galera"]["cluster_initial_replicate"] == "ok"
           end
           hash = {}
           hash["attr"] = "galera"
-          hash["key"] = "cluster_status"
+          hash["key"] = "cluster_state"
           hash["var"] = "ready"
           hash["timeout"] = 300
           hash["sttime"]=Time.now.to_f
