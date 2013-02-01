@@ -79,6 +79,7 @@ else
   # Shorter query format (alff), also reduce result count by chef_environment
   results = search(:node, "role:#{galera_role} AND wsrep_cluster_name:#{cluster_name} AND chef_environment:#{node.chef_environment}")
   galera_nodes = results
+  cluster_list = []
 
   if results.empty?
     ::Chef::Application.fatal!("Searched for role #{galera_role} and cluster name #{cluster_name} found no nodes. Exiting.")
@@ -93,10 +94,20 @@ else
     else
       address = result['mysql']['bind_address']
     end
+    gl_node = {}
+    gl_node[result_name] = adress
+    # Compose array of galera nodes
+    if result.key?("roles")&&result["roles"].include?(galera_reference_role)
+      cluster_list = [gl_node] + cluster_list
+    else
+      cluster_list.push gl_node
+    end
     unless result.name == node.name
       ::Chef::Log.info "Adding #{address} to list of cluster addresses in cluster '#{cluster_name}'."
       cluster_addresses << address
     end
+    if node["galera"]["cluster_list"].nil?||node["galera"]["cluster_list"].empty?
+      node["galera"]["cluster_list"] = cluster_list
     end
     
     ::Chef::Log.info "Searching for reference node having role '#{galera_reference_role}' in cluster '#{cluster_name}'"
@@ -109,7 +120,7 @@ else
       reference_node = results[0]
     end
   end
-  node.save
+    node.save
 end
 
 # Compose list of galera ip's
@@ -209,7 +220,10 @@ template "#{node['mysql']['conf_dir']}/my.cnf" do
   owner "root"
   group node['mysql']['root_group']
   mode 00644
-  notifies :restart, resources(:service => "mysql")
+  # Idempotence for sheduled chef_run job
+  if node["galera"].key?("cluster_initial_replicate")&&node["galera"]["cluster_initial_replicate"] == "ok"&&node["galera"].key?("cluster_node_status")&&node["galera"]["cluster_node_status"] == "ready"
+    notifies :restart, resources(:service => "mysql")
+  end
   variables(
     "skip_federated" => skip_federated
   )
@@ -221,7 +235,10 @@ template "#{node['mysql']['confd_dir']}/wsrep.cnf" do
   owner "root"
   group node['mysql']['root_group']
   mode 00644
-  notifies :restart, "service[mysql]"
+  # Idempotence for sheduled chef_run job
+  if node["galera"].key?("cluster_initial_replicate")&&node["galera"]["cluster_initial_replicate"] == "ok"&&node["galera"].key?("cluster_node_status")&&node["galera"]["cluster_node_status"] == "ready"
+    notifies :restart, resources(:service => "mysql")
+  end
   variables(
     "sst_receive_address" => sst_receive_address,
     "wsrep_cluster_address" => wsrep_ip_list,
@@ -252,10 +269,21 @@ script "Check-sync-status" do
 end
 
 # Set flag that first stage of galera cluster init completed
+# Also we set default flag that current node is ready
 ruby_block "Set-initial_replicate-state" do
   block do
     node.set_unless["galera"] ||={}
     node.set_unless["galera"]["cluster_initial_replicate"] = "ok"
+    node.set_unless["galera"]["cluster_node_status"] = "ready"
+    node.save
+  end
+  action :nothing
+end
+
+# Set flag that node was reconfigured
+ruby_block "Reconfigured-ok" do
+  block do
+    node.set["galera"]["cluster_node_status"] = "ready"
     node.save
   end
   action :nothing
@@ -286,6 +314,7 @@ end
 ruby_block "Cluster-ready" do
   block do
     node.set["galera"]["cluster_status"] = "ready"
+    node.set["galera"]["cluster_state"] = "ready"
   end
   action :nothing
 end
@@ -293,7 +322,7 @@ end
 
 
 # Is this node reference node or not.
-if node.run_list.role_names.include?(galera_reference_role)
+if node.run_list.role_names.include?(galera_reference_role)||node.key?("roles")&&node["roles"].include?(galera_reference_role)
   master = true
 else
   master = false
@@ -302,6 +331,23 @@ end
 # Start of galera cluster configuration
 unless node["galera"]["cluster_initial_replicate"] == "ok"
   if master
+    # At first send cluster list to the master node
+    set_cll = ruby_block "Set-cluster-list" do
+      block do
+        node.set_unless["galera"] ||={}
+        node.set_unless["galera"]["cluster_list"] ||=[]
+        node.set["galera"]["cluster_list"] = cluster_list
+        hash = {}
+        hash["attr"] = "galera"
+        hash["key"] = "cluster_cluster_list"
+        hash["var"] = nil
+        hash["timeout"] = node["galera"]["global_timer"]
+        hash["sttime"]=Time.now.to_f
+        check_state_attr(node,hash)
+      end
+      action :nothing
+    end
+    set_cll.run_action(:create)
     wsrep_cluster_address = "gcomm://"
 
     # TODO: It would be nice if we could implement howto check that mysql 
@@ -430,6 +476,86 @@ unless node["galera"]["cluster_initial_replicate"] == "ok"
       # Set flag that non-reference node is in operating condition
       notifies :create, "ruby_block[Cluster-ready]"
     end
+  end
+end
+
+ # Block for automated scale and can be improve with autoheal feaute :)
+if master
+  if node["galera"]["cluster_list"].size != cluster_list.size || node["galera"]["cluster_list"] - cluster_list != []
+    node.set["galera"]["cluster_state"] = "rebuild"
+    node.set["galera"]["cluster_node_status"] = "rebuild"
+    node.save
+    hash = {}
+    hash["attr"] = "galera"
+    hash["key"] = "cluster_state"
+    hash["var"] = "rebuild"
+    hash["timeout"] = node["galera"]["global_timer"]
+    hash["sttime"]=Time.now.to_f
+    check_state_attr(node,hash)
+    hash["key"] = "cluster_node_status"
+    check_state_attr(node,hash)
+
+    ruby_block "Init-reload-mysql" do
+      block do
+        Chef::Log.info "Initialize Galera cluster reconfigure.."
+      end
+      notifies :restart, resources(:service => "mysql"), :immediately
+      notifies :run, "script[Check-sync-status]", :immediately
+      notifies :create, "ruby_block[Reconfigured-ok]", :immediately
+    end
+    # Check that all non-reference nodes are in operate condition
+    ruby_block "Check-galera-nodes-status" do
+      block do
+        cluster_list.each do |result|
+          gserver=galera_nodes.select {|d| d.name == result.keys[0]}[0]
+          hash = {}
+          hash["attr"] = "galera"
+          hash["key"] = "cluster_node_status"
+          hash["var"] = "ready"
+          hash["timeout"] = 300
+          hash["sttime"]=Time.now.to_f
+          check_state_attr(gserver,hash)
+        end
+      end
+      notifies :create, "ruby_block[Cluster-ready]"
+    end
+  end
+else
+  if reference_node["galera"].key?("cluster_state") && reference_node["galera"]["cluster_state"] == "rebuild"
+    node.set["galera"]["cluster_node_status"] = "rebuild"
+    node.save
+    hash = {}
+    hash["attr"] = "galera"
+    hash["key"] = "cluster_state"
+    hash["var"] = "rebuild"
+    hash["timeout"] = node["galera"]["global_timer"]
+    hash["sttime"]=Time.now.to_f
+    check_state_attr(node,hash)
+    cluster_list = reference_node["galera"]["cluster_list"]
+
+    cluster_list.each do |result|
+      gserver=galera_nodes.select {|d| d.name == result.keys[0]}[0]
+      if gserver.name == node.name
+        ruby_block "Init-reconfigure-mysql-config" do
+          block do
+            Chef::Log.info "Initialize Galera node reconfigure.."
+          end
+          notifies :restart, resources(:service => "mysql"), :immediately
+          notifies :run, "script[Check-sync-status]", :immediately
+          notifies :create, "ruby_block[Reconfigured-ok]", :immediately
+        end
+      else
+        hash = {}
+        hash["attr"] = "galera"
+        hash["key"] = "cluster_node_status"
+        hash["var"] = "ready"
+        hash["timeout"] = 300
+        hash["sttime"]=Time.now.to_f
+        check_state_attr(gserver,hash)
+      end
+    end
 
   end
+
+
 end
