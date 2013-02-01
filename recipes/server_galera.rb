@@ -95,7 +95,7 @@ else
       address = result['mysql']['bind_address']
     end
     gl_node = {}
-    gl_node[result_name] = adress
+    gl_node[result.name] = address
     # Compose array of galera nodes
     if result.key?("roles")&&result["roles"].include?(galera_reference_role)
       cluster_list = [gl_node] + cluster_list
@@ -338,9 +338,10 @@ unless node["galera"]["cluster_initial_replicate"] == "ok"
         node.set_unless["galera"] ||={}
         node.set_unless["galera"]["cluster_list"] ||=[]
         node.set["galera"]["cluster_list"] = cluster_list
+        node.save
         hash = {}
         hash["attr"] = "galera"
-        hash["key"] = "cluster_cluster_list"
+        hash["key"] = "cluster_list"
         hash["var"] = nil
         hash["timeout"] = node["galera"]["global_timer"]
         hash["sttime"]=Time.now.to_f
