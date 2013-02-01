@@ -109,6 +109,7 @@ else
     if node["galera"]["cluster_list"].nil?||node["galera"]["cluster_list"].empty?
       node["galera"]["cluster_list"] = cluster_list
     end
+    end
     
     ::Chef::Log.info "Searching for reference node having role '#{galera_reference_role}' in cluster '#{cluster_name}'"
     results = search(:node, "role:#{galera_reference_role} AND wsrep_cluster_name:#{cluster_name} AND chef_environment:#{node.chef_environment}")
@@ -554,8 +555,5 @@ else
         check_state_attr(gserver,hash)
       end
     end
-
   end
-
-
 end
