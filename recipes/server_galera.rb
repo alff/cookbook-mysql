@@ -351,6 +351,15 @@ unless node["galera"]["cluster_initial_replicate"] == "ok"
     set_cll.run_action(:create)
     wsrep_cluster_address = "gcomm://"
 
+    # Install new empty system DB
+    execute 'mysql-install-db' do
+      command "mysql_install_db"
+      action :run
+      # Do not need to install databases on non-reference nodes since
+      # SST will replicate the databases to those nodes
+      not_if { File.exists?(node['mysql']['data_dir'] + '/mysql/user.frm') }
+    end
+
     # TODO: It would be nice if we could implement howto check that mysql 
     # proccess is accepting connections and remove from script ugly 'sleep'.
     # Start mysql daemon in cluster initialization mode
@@ -361,15 +370,6 @@ unless node["galera"]["cluster_initial_replicate"] == "ok"
       mysqld --pid-file=#{node["galera"]["mysqld_pid"]} --wsrep_cluster_address=#{wsrep_cluster_address} &>1 &
       sleep 10
       EOH
-    end
-
-    # Install new empty system DB
-    execute 'mysql-install-db' do
-      command "mysql_install_db"
-      action :run
-      # Do not need to install databases on non-reference nodes since
-      # SST will replicate the databases to those nodes
-      not_if { File.exists?(node['mysql']['data_dir'] + '/mysql/user.frm') }
     end
 
     # set the root password for situations that don't support pre-seeding.
